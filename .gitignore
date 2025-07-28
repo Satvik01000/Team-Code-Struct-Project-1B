@@ -4,3 +4,9 @@ models/
 __pycache__/
 *.pyc
 PDFs/
+input/
+output/
+text.txt
+app/processing.py
+streamlit_app.py
+download_model.py
