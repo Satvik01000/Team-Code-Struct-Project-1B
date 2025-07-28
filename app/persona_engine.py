@@ -1,5 +1,3 @@
-# app/persona_engine.py
-
 import os
 import time
 import re
@@ -10,7 +8,6 @@ from sentence_transformers import SentenceTransformer, util
 from app.document_processor import DocumentProcessor
 from app.structure_analyzer import StructureAnalyzer
 
-# --- Keyword sets for your rule-based filter ---
 NON_VEGETARIAN_TERMS = {'chicken', 'beef', 'pork', 'lamb', 'meat', 'fish', 'tuna', 'salmon', 'bacon', 'sausage'}
 GLUTEN_TERMS = {'flour', 'wheat', 'bread', 'pasta', 'barley'}
 
@@ -19,71 +16,53 @@ class PersonaIntelligenceEngine:
         self.doc_processor = DocumentProcessor()
         self.structure_analyzer = StructureAnalyzer()
         model_path = './models/all-MiniLM-L6-v2'
-        print(f"🧠 Loading NLP model from {model_path}...")
         self.model = SentenceTransformer(model_path)
-        print("✅ Persona Intelligence Engine Initialized.")
 
     def analyze_document_collection(self, pdf_paths: List[str], persona: str, job: str) -> Dict:
         start_time = time.time()
         query_text = f"{persona} {job}"
         
-        # STEP 1: Get all sections from all documents using your 1A logic.
         all_sections = self._get_intelligent_sections(pdf_paths)
         if not all_sections:
             return self._format_final_output(persona, job, pdf_paths, [], [])
 
-        # STEP 2: Use the NLP model to get a broad list of semantically relevant candidates.
         candidate_sections = self._get_semantic_candidates(query_text, all_sections)
-
-        # STEP 3: Apply your precise, rule-based filtering and ranking to the candidates.
         final_ranked_sections = self._filter_and_rank_with_rules(candidate_sections, query_text)
-
-        # STEP 4: Extract the final subsections.
         subsection_analysis = self._extract_subsections(final_ranked_sections[:5])
 
         return self._format_final_output(persona, job, pdf_paths, final_ranked_sections, subsection_analysis)
 
     def _get_semantic_candidates(self, query_text: str, all_sections: List[Dict]) -> List[Dict]:
-        """Uses the NLP model to find the top 100 sections that are semantically similar to the query."""
         section_contents = [f"{s['section_title']} {s['content']}" for s in all_sections]
-        section_embeddings = self.model.encode(section_contents, convert_to_tensor=True, show_progress_bar=True)
+        section_embeddings = self.model.encode(section_contents, convert_to_tensor=True, show_progress_bar=False)
         query_embedding = self.model.encode(query_text, convert_to_tensor=True)
         
-        # Get similarity scores
         similarities = util.cos_sim(query_embedding, section_embeddings).flatten()
         
         for i, section in enumerate(all_sections):
             section['relevance_score'] = similarities[i].item()
             
-        # Get the top 100 most similar sections as a starting point
         all_sections.sort(key=lambda x: x['relevance_score'], reverse=True)
         return all_sections[:100]
 
     def _filter_and_rank_with_rules(self, candidates: List[Dict], query: str) -> List[Dict]:
-        """Applies hard rules to filter and rank a list of candidates."""
         query_lower = query.lower()
         
-        # --- Rule-Based Filtering ---
         filtered_sections = []
         for section in candidates:
             content_lower = (section['section_title'] + ' ' + section['content']).lower()
             
-            # Constraint: Check for vegetarian
             if 'vegetarian' in query_lower and any(term in content_lower for term in NON_VEGETARIAN_TERMS):
-                continue # Discard if it contains meat
-
-            # Constraint: Check for gluten-free
+                continue
             if 'gluten-free' in query_lower and any(term in content_lower for term in GLUTEN_TERMS):
-                continue # Discard if it contains gluten
+                continue
             
             filtered_sections.append(section)
             
-        # --- Rule-Based Ranking ---
         for section in filtered_sections:
-            score = section['relevance_score'] # Start with the base semantic score
+            score = section['relevance_score']
             title_lower = section['section_title'].lower()
             
-            # Boost score for important query keywords in the title
             if 'form' in query_lower and 'form' in title_lower: score *= 1.5
             if 'dinner' in query_lower and 'dinner' in section['document'].lower(): score *= 1.2
             if 'main' in query_lower and 'mains' in section['document'].lower(): score *= 1.2
@@ -92,7 +71,6 @@ class PersonaIntelligenceEngine:
             
         filtered_sections.sort(key=lambda x: x['relevance_score'], reverse=True)
         
-        # Assign final importance rank
         for i, section in enumerate(filtered_sections):
             section['importance_rank'] = i + 1
             
@@ -101,7 +79,6 @@ class PersonaIntelligenceEngine:
     def _extract_subsections(self, top_sections: List[Dict]) -> List[Dict]:
         subsections = []
         for section in top_sections:
-            # Extract the first 2-3 sentences as a snippet
             sentences = re.split(r'(?<=[.!?])\s+', section['content'])
             snippet = " ".join(sentences[:2])
             
@@ -113,7 +90,6 @@ class PersonaIntelligenceEngine:
         return subsections
         
     def _get_intelligent_sections(self, pdf_paths: List[str]) -> List[Dict]:
-        # This function is from our previous discussions and works well.
         all_sections = []
         for path in pdf_paths:
             doc_content = self.doc_processor.extract_structured_content(path)
