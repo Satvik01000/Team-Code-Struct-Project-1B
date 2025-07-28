@@ -1,213 +1,162 @@
+# app/persona_engine.py
+
+import os
 import time
-import numpy as np
 import re
-import os  # ADD THIS IMPORT
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 from collections import defaultdict
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer, util
 
 from app.document_processor import DocumentProcessor
 from app.structure_analyzer import StructureAnalyzer
+
+# --- Keyword sets for your rule-based filter ---
+NON_VEGETARIAN_TERMS = {'chicken', 'beef', 'pork', 'lamb', 'meat', 'fish', 'tuna', 'salmon', 'bacon', 'sausage'}
+GLUTEN_TERMS = {'flour', 'wheat', 'bread', 'pasta', 'barley'}
 
 class PersonaIntelligenceEngine:
     def __init__(self):
         self.doc_processor = DocumentProcessor()
         self.structure_analyzer = StructureAnalyzer()
-        
-        self.vectorizer = TfidfVectorizer(
-            max_features=5000,
-            stop_words='english',
-            ngram_range=(1, 2)
-        )
-        
-        # Enhanced keywords for the food contractor persona
-        self.persona_keywords = {
-            'food_contractor': ['vegetarian', 'veg', 'veggie', 'gluten-free', 'gluten free', 
-                               'buffet', 'dinner', 'menu', 'dish', 'recipe', 'ingredients',
-                               'vegetable', 'plant-based', 'meat-free', 'meatless'],
-        }
-        
-        # Keywords to EXCLUDE (non-vegetarian items)
-        self.exclude_keywords = ['chicken', 'beef', 'pork', 'lamb', 'turkey', 'fish', 
-                                'shrimp', 'meat', 'bacon', 'sausage', 'ham', 'seafood']
-        
+        model_path = './models/all-MiniLM-L6-v2'
+        print(f"🧠 Loading NLP model from {model_path}...")
+        self.model = SentenceTransformer(model_path)
+        print("✅ Persona Intelligence Engine Initialized.")
+
     def analyze_document_collection(self, pdf_paths: List[str], persona: str, job: str) -> Dict:
         start_time = time.time()
+        query_text = f"{persona} {job}"
         
-        print(f"📚 Processing {len(pdf_paths)} documents...")
-        all_sections = self._extract_dinner_sections(pdf_paths)
-        print(f"    - Extracted {len(all_sections)} sections.")
+        # STEP 1: Get all sections from all documents using your 1A logic.
+        all_sections = self._get_intelligent_sections(pdf_paths)
+        if not all_sections:
+            return self._format_final_output(persona, job, pdf_paths, [], [])
+
+        # STEP 2: Use the NLP model to get a broad list of semantically relevant candidates.
+        candidate_sections = self._get_semantic_candidates(query_text, all_sections)
+
+        # STEP 3: Apply your precise, rule-based filtering and ranking to the candidates.
+        final_ranked_sections = self._filter_and_rank_with_rules(candidate_sections, query_text)
+
+        # STEP 4: Extract the final subsections.
+        subsection_analysis = self._extract_subsections(final_ranked_sections[:5])
+
+        return self._format_final_output(persona, job, pdf_paths, final_ranked_sections, subsection_analysis)
+
+    def _get_semantic_candidates(self, query_text: str, all_sections: List[Dict]) -> List[Dict]:
+        """Uses the NLP model to find the top 100 sections that are semantically similar to the query."""
+        section_contents = [f"{s['section_title']} {s['content']}" for s in all_sections]
+        section_embeddings = self.model.encode(section_contents, convert_to_tensor=True, show_progress_bar=True)
+        query_embedding = self.model.encode(query_text, convert_to_tensor=True)
         
-        # Filter for vegetarian and gluten-free items
-        filtered_sections = self._filter_vegetarian_gluten_free(all_sections)
-        print(f"    - Found {len(filtered_sections)} vegetarian/gluten-free sections.")
+        # Get similarity scores
+        similarities = util.cos_sim(query_embedding, section_embeddings).flatten()
         
-        # Rank by relevance
-        ranked_sections = self._rank_sections(filtered_sections, persona, job)
-        
-        # Extract refined text from top sections
-        subsection_analysis = self._extract_refined_text(ranked_sections[:10])
-        
-        return self._format_output(persona, job, pdf_paths, ranked_sections, subsection_analysis)
-    
-    def _extract_dinner_sections(self, pdf_paths: List[str]) -> List[Dict]:
-        """Extract sections specifically from dinner-related PDFs"""
-        all_sections = []
-        
-        for path in pdf_paths:
-            filename = os.path.basename(path)
+        for i, section in enumerate(all_sections):
+            section['relevance_score'] = similarities[i].item()
             
-            # Only process dinner-related files for this task
-            if 'Dinner' not in filename and 'Lunch' not in filename:
-                continue
-                
-            doc_content = self.doc_processor.extract_structured_content(path)
-            
-            # Extract individual recipe/dish sections
-            sections = self._extract_recipe_sections(doc_content, filename)
-            all_sections.extend(sections)
-            
-        return all_sections
-    
-    def _extract_recipe_sections(self, doc_content: Dict, filename: str) -> List[Dict]:
-        """Extract individual recipes as sections"""
-        sections = []
+        # Get the top 100 most similar sections as a starting point
+        all_sections.sort(key=lambda x: x['relevance_score'], reverse=True)
+        return all_sections[:100]
+
+    def _filter_and_rank_with_rules(self, candidates: List[Dict], query: str) -> List[Dict]:
+        """Applies hard rules to filter and rank a list of candidates."""
+        query_lower = query.lower()
         
-        for page in doc_content.get("pages", []):
-            page_text = page.get("raw_text", "")
-            page_num = page.get("page_index", 0)
+        # --- Rule-Based Filtering ---
+        filtered_sections = []
+        for section in candidates:
+            content_lower = (section['section_title'] + ' ' + section['content']).lower()
             
-            # Split by common recipe patterns
-            # Look for recipe titles (usually standalone lines before "Ingredients:")
-            recipes = re.split(r'\n(?=[A-Z][a-zA-Z\s]+\nIngredients:)', page_text)
+            # Constraint: Check for vegetarian
+            if 'vegetarian' in query_lower and any(term in content_lower for term in NON_VEGETARIAN_TERMS):
+                continue # Discard if it contains meat
+
+            # Constraint: Check for gluten-free
+            if 'gluten-free' in query_lower and any(term in content_lower for term in GLUTEN_TERMS):
+                continue # Discard if it contains gluten
             
-            for recipe_text in recipes:
-                if 'Ingredients:' in recipe_text:
-                    # Extract recipe name
-                    lines = recipe_text.strip().split('\n')
-                    recipe_name = lines[0].strip() if lines else "Unknown Recipe"
-                    
-                    sections.append({
-                        "document": filename,
-                        "page": page_num,
-                        "section_title": recipe_name,
-                        "content": recipe_text.strip()
-                    })
-        
-        return sections
-    
-    def _filter_vegetarian_gluten_free(self, sections: List[Dict]) -> List[Dict]:
-        """Filter sections to only include vegetarian and potentially gluten-free items"""
-        filtered = []
-        
-        for section in sections:
-            content_lower = section['content'].lower()
+            filtered_sections.append(section)
+            
+        # --- Rule-Based Ranking ---
+        for section in filtered_sections:
+            score = section['relevance_score'] # Start with the base semantic score
             title_lower = section['section_title'].lower()
             
-            # Skip if contains non-vegetarian ingredients
-            if any(keyword in content_lower for keyword in self.exclude_keywords):
-                continue
-            
-            # Check for vegetarian indicators
-            is_vegetarian = (
-                'vegetable' in title_lower or
-                'veggie' in title_lower or
-                'vegetarian' in title_lower or
-                not any(meat in content_lower for meat in self.exclude_keywords)
-            )
-            
-            # Check for gluten-free potential (no wheat, flour, pasta, bread in ingredients)
-            gluten_ingredients = ['flour', 'bread', 'pasta', 'wheat', 'noodles', 'couscous']
-            is_potentially_gluten_free = not any(gluten in content_lower for gluten in gluten_ingredients)
-            
-            # Include if vegetarian (prioritize gluten-free)
-            if is_vegetarian:
-                section['is_gluten_free'] = is_potentially_gluten_free
-                filtered.append(section)
-        
-        return filtered
-    
-    def _rank_sections(self, sections: List[Dict], persona: str, job: str) -> List[Dict]:
-        """Rank sections by relevance to buffet-style dinner and gluten-free requirements"""
-        for section in sections:
-            score = 0
-            content_lower = section['content'].lower()
-            
-            # Bonus for gluten-free items
-            if section.get('is_gluten_free', False):
-                score += 0.3
-            
-            # Bonus for dishes suitable for buffet
-            buffet_keywords = ['salad', 'dip', 'platter', 'bowl', 'roasted', 'grilled']
-            if any(keyword in content_lower for keyword in buffet_keywords):
-                score += 0.2
-            
-            # Check for ease of preparation in bulk
-            if 'easy' in content_lower or 'simple' in content_lower:
-                score += 0.1
+            # Boost score for important query keywords in the title
+            if 'form' in query_lower and 'form' in title_lower: score *= 1.5
+            if 'dinner' in query_lower and 'dinner' in section['document'].lower(): score *= 1.2
+            if 'main' in query_lower and 'mains' in section['document'].lower(): score *= 1.2
             
             section['relevance_score'] = score
+            
+        filtered_sections.sort(key=lambda x: x['relevance_score'], reverse=True)
         
-        # Sort by relevance
-        sections.sort(key=lambda x: x['relevance_score'], reverse=True)
-        
-        # Assign importance ranks
-        for i, section in enumerate(sections):
+        # Assign final importance rank
+        for i, section in enumerate(filtered_sections):
             section['importance_rank'] = i + 1
-        
-        return sections
-    
-    def _extract_refined_text(self, top_sections: List[Dict]) -> List[Dict]:
-        """Extract recipe ingredients and instructions as refined text"""
-        refined = []
-        
+            
+        return filtered_sections
+
+    def _extract_subsections(self, top_sections: List[Dict]) -> List[Dict]:
+        subsections = []
         for section in top_sections:
-            content = section['content']
+            # Extract the first 2-3 sentences as a snippet
+            sentences = re.split(r'(?<=[.!?])\s+', section['content'])
+            snippet = " ".join(sentences[:2])
             
-            # Extract ingredients and instructions
-            ingredients_match = re.search(r'Ingredients:(.*?)Instructions:', content, re.DOTALL)
-            instructions_match = re.search(r'Instructions:(.*?)$', content, re.DOTALL)
-            
-            if ingredients_match and instructions_match:
-                ingredients = ingredients_match.group(1).strip()
-                instructions = instructions_match.group(1).strip()
-                
-                # Clean up formatting
-                ingredients = re.sub(r'\s+', ' ', ingredients)
-                instructions = re.sub(r'\s+', ' ', instructions)
-                
-                refined_text = f"{section['section_title']} Ingredients: {ingredients} Instructions: {instructions}"
-                
-                refined.append({
-                    "document": section['document'],
-                    "page": section['page'],
-                    "refined_text": refined_text[:500]  # Limit length
+            subsections.append({
+                "document": section['document'],
+                "page_number": section['page'],
+                "refined_text": re.sub(r'\s+', ' ', snippet).strip()[:500]
+            })
+        return subsections
+        
+    def _get_intelligent_sections(self, pdf_paths: List[str]) -> List[Dict]:
+        # This function is from our previous discussions and works well.
+        all_sections = []
+        for path in pdf_paths:
+            doc_content = self.doc_processor.extract_structured_content(path)
+            _, headings = self.structure_analyzer.analyze(doc_content)
+            spans_by_page = defaultdict(list)
+            for page in doc_content.get("pages", []): spans_by_page[page['page_index']] = page.get('content_spans', [])
+            headings.sort(key=lambda h: (h['page'], h['text']))
+            for i, heading in enumerate(headings):
+                start_page = heading['page']
+                heading_y_pos = 0
+                for span in spans_by_page[start_page]:
+                    if span['text'].strip() == heading['text']: heading_y_pos = span['style_info']['y1']; break
+                end_page = doc_content.get('total_pages', start_page)
+                end_y_pos = 9999
+                if i + 1 < len(headings):
+                    next_heading = headings[i+1]
+                    end_page = next_heading['page']
+                    for span in spans_by_page[end_page]:
+                         if span['text'].strip() == next_heading['text']: end_y_pos = span['style_info']['y0']; break
+                section_content_spans = []
+                for page_num in range(start_page, end_page + 1):
+                    for span in spans_by_page.get(page_num, []):
+                        y0 = span['style_info']['y0']
+                        if (page_num == start_page and y0 > heading_y_pos) or \
+                           (page_num > start_page and page_num < end_page) or \
+                           (page_num == end_page and y0 < end_y_pos):
+                            section_content_spans.append(span['text'])
+                all_sections.append({
+                    "document": os.path.basename(path), "page": start_page,
+                    "section_title": heading["text"], "content": " ".join(section_content_spans)
                 })
-        
-        return refined
-    
-    def _format_output(self, persona, job, pdfs, sections, subsections):
-        """Format output matching the expected structure"""
-        # Fix the timestamp format - remove microseconds
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        
+        return all_sections
+
+    def _format_final_output(self, persona, job, pdfs, sections, subsections):
         return {
             "metadata": {
                 "input_documents": [os.path.basename(p) for p in pdfs],
-                "persona": persona,
-                "job_to_be_done": job,
-                "processing_timestamp": timestamp
+                "persona": persona, "job_to_be_done": job,
+                "processing_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             },
             "extracted_sections": [{
-                "document": s['document'],
-                "section_title": s['section_title'],
-                "importance_rank": s['importance_rank'],
-                "page_number": s['page']
-            } for s in sections[:5]],  # Top 5 sections
-            "subsection_analysis": [{
-                "document": ss['document'],
-                "refined_text": ss['refined_text'],
-                "page_number": ss['page']
-            } for ss in subsections[:5]]  # Top 5 subsections
+                "document": s['document'], "page_number": s['page'],
+                "section_title": s['section_title'], "importance_rank": s['importance_rank']
+            } for s in sections],
+            "subsection_analysis": subsections
         }
